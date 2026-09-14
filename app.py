@@ -193,6 +193,9 @@ def run_pipeline(prev_rgb, curr_rgb, delta_weight):
     best_area, best_i = max(candidates)
     blob_bin = (lbl==best_i)
     vals = new_mask[blob_bin]; vals = vals[vals>0]
+    if len(vals) == 0:
+        return {"status":"no_new_food","reason":"Blob has no class pixels","dish":None,
+                "confidence":0.0,"weight_g":round(delta_weight,1),"calories_kcal":0.0}
     uid,cnt = np.unique(vals, return_counts=True)
     seg_raw  = FOODSEG103_CLASSES[int(uid[cnt.argmax()])]
     seg_name = SEG_CLASS_REMAP.get(seg_raw, seg_raw)
@@ -242,3 +245,4 @@ async def analyze(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+
