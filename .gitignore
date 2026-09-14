@@ -1,0 +1,9 @@
+﻿# ONNX model files — uploaded to GitHub Releases, not the repo
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
