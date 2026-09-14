@@ -1,4 +1,4 @@
-﻿"""
+"""
 Gastronomy AI - Delta Food Detection API v2
 Endpoint: POST /analyze  (prev_image + curr_image + weights)
 Models:   SegFormer ONNX (seg) + EfficientNet ONNX (clf)
@@ -13,7 +13,7 @@ KEY FIXES vs original app.py:
 """
 
 import os, cv2, numpy as np, onnxruntime as ort, urllib.request
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse
 
 # --- CONFIG ---
@@ -250,8 +250,74 @@ async def analyze(
         import traceback; traceback.print_exc()
         return JSONResponse(status_code=500, content={"status":"error","message":str(e)})
 
+
+@app.post("/analyze_batch")
+async def analyze_batch(request: Request):
+    """
+    Batch delta endpoint called by ESP32 SEND button.
+    Accepts N images (image_0..image_{N-1}) + N weights (weight_0..weight_{N-1}).
+    Processes N-1 consecutive deltas and returns all results.
+    """
+    try:
+        form = await request.form()
+
+        # Extract all images and weights dynamically
+        images, weights = [], []
+        i = 0
+        while True:
+            img_key = f"image_{i}"
+            wt_key  = f"weight_{i}"
+            if img_key not in form:
+                break
+            img_bytes = await form[img_key].read()
+            images.append(decode_image(img_bytes))
+            weights.append(float(form[wt_key]))
+            i += 1
+
+        N = len(images)
+        if N < 2:
+            return JSONResponse(status_code=400, content={
+                "status": "error",
+                "message": f"Need at least 2 images, got {N}"
+            })
+
+        print(f"[Batch] Processing {N} snaps → {N-1} deltas")
+
+        results = []
+        for step in range(N - 1):
+            delta_w = max(0.0, weights[step+1] - weights[step])
+            print(f"[Batch] Step {step+1}/{N-1}: delta={delta_w:.1f}g")
+
+            if delta_w < 5.0:
+                results.append({
+                    "step": step + 1,
+                    "status": "ignored",
+                    "reason": f"Weight delta {delta_w:.1f}g < 5g",
+                    "dish": None,
+                    "confidence": 0.0,
+                    "weight_g": round(delta_w, 1),
+                    "calories_kcal": 0.0,
+                })
+                continue
+
+            r = run_pipeline(images[step], images[step+1], delta_w)
+            r["step"] = step + 1
+            results.append(r)
+
+        total_kcal = sum(r.get("calories_kcal", 0) for r in results)
+        return JSONResponse({
+            "status": "success",
+            "count": len(results),
+            "total_calories_kcal": round(total_kcal, 1),
+            "results": results,
+        })
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+
 
 
