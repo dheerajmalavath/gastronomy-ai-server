@@ -18,11 +18,11 @@ from fastapi.responses import JSONResponse
 
 # --- CONFIG ---
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-SEGFORMER_ONNX  = os.path.join(BASE_DIR, "segformer.onnx")
+SEGFORMER_ONNX  = os.path.join(BASE_DIR, "segformer_quant.onnx")
 CLASSIFIER_ONNX = os.path.join(BASE_DIR, "classifier.onnx")
 
 GITHUB_RELEASE_BASE = "https://github.com/dheerajmalavath/gastronomy-ai-server/releases/download/v1.0"
-SEGFORMER_URL  = f"{GITHUB_RELEASE_BASE}/segformer.onnx"
+SEGFORMER_URL  = f"{GITHUB_RELEASE_BASE}/segformer_quant.onnx"
 CLASSIFIER_URL = f"{GITHUB_RELEASE_BASE}/classifier.onnx"
 
 # SegFormer: ImageNet normalisation (CONFIRMED correct vs /255-only)
@@ -87,7 +87,15 @@ DEFAULT_CAL = 1.6
 def download_model(url, dest):
     if not os.path.exists(dest):
         print(f"[Boot] Downloading {os.path.basename(dest)} ...")
-        urllib.request.urlretrieve(url, dest)
+        import urllib.request
+        # Stream in 8 MB chunks — avoids loading full file into RAM at once
+        with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+            chunk = 8 * 1024 * 1024  # 8 MB chunks
+            while True:
+                data = resp.read(chunk)
+                if not data:
+                    break
+                f.write(data)
         print(f"[Boot] Done: {os.path.getsize(dest)//1024//1024} MB")
     else:
         print(f"[Boot] Found {os.path.basename(dest)} ({os.path.getsize(dest)//1024//1024} MB)")
@@ -245,4 +253,5 @@ async def analyze(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+
 
