@@ -110,6 +110,8 @@ download_model(CLASSIFIER_URL, CLASSIFIER_ONNX)
 # --- LOAD MODELS ---
 print("[Boot] Loading ONNX sessions ...")
 opts = ort.SessionOptions()
+opts.intra_op_num_threads = 1
+opts.inter_op_num_threads = 1
 opts.enable_mem_pattern = False
 opts.enable_cpu_mem_arena = False
 
