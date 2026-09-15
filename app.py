@@ -268,17 +268,7 @@ def process_batch_background(job_id: str, images: list, weights: list):
             delta_w = max(0.0, weights[step+1] - weights[step])
             print(f"[Job {job_id}] Step {step+1}/{N-1}: delta={delta_w:.1f}g")
 
-            if delta_w < 5.0:
-                results.append({
-                    "step": step + 1,
-                    "status": "ignored",
-                    "reason": f"Weight delta {delta_w:.1f}g < 5g",
-                    "dish": None,
-                    "confidence": 0.0,
-                    "weight_g": round(delta_w, 1),
-                    "calories_kcal": 0.0,
-                })
-                continue
+
 
             r = run_pipeline(images[step], images[step+1], delta_w)
             r["step"] = step + 1
