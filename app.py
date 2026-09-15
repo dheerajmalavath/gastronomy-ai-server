@@ -12,7 +12,7 @@ KEY FIXES vs original app.py:
   5. Full FOODSEG103 + Indian food class lists
 """
 
-import os, cv2, numpy as np, onnxruntime as ort, urllib.request, uuid
+import os, cv2, numpy as np, onnxruntime as ort, urllib.request, uuid, gc
 from fastapi import FastAPI, File, UploadFile, Form, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 
@@ -109,9 +109,13 @@ download_model(CLASSIFIER_URL, CLASSIFIER_ONNX)
 
 # --- LOAD MODELS ---
 print("[Boot] Loading ONNX sessions ...")
+opts = ort.SessionOptions()
+opts.enable_mem_pattern = False
+opts.enable_cpu_mem_arena = False
+
 _providers   = ['CPUExecutionProvider']
-seg_session  = ort.InferenceSession(SEGFORMER_ONNX,  providers=_providers)
-clf_session  = ort.InferenceSession(CLASSIFIER_ONNX, providers=_providers)
+seg_session  = ort.InferenceSession(SEGFORMER_ONNX,  sess_options=opts, providers=_providers)
+clf_session  = ort.InferenceSession(CLASSIFIER_ONNX, sess_options=opts, providers=_providers)
 _clf_inp     = clf_session.get_inputs()[0].name
 print("[Boot] Both models ready.")
 
@@ -134,6 +138,8 @@ def seg_predict(img_rgb: np.ndarray):
     inp = arr.transpose(2,0,1)[np.newaxis]
     logits = seg_session.run(None, {"image": inp})[0]
     mask = np.argmax(logits, axis=1)[0].astype(np.uint8)
+    del logits, arr, inp
+    gc.collect()
     return mask, img512
 
 def filter_plate(mask):
@@ -273,6 +279,7 @@ def process_batch_background(job_id: str, images: list, weights: list):
             r = run_pipeline(images[step], images[step+1], delta_w)
             r["step"] = step + 1
             results.append(r)
+            gc.collect()
 
         total_kcal = sum(r.get("calories_kcal", 0) for r in results)
         jobs[job_id] = {
