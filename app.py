@@ -12,8 +12,12 @@ KEY FIXES vs original app.py:
   5. Full FOODSEG103 + Indian food class lists
 """
 
-import os, cv2, numpy as np, onnxruntime as ort, urllib.request, uuid, gc
-from fastapi import FastAPI, File, UploadFile, Form, Request, BackgroundTasks
+import os
+os.environ["MALLOC_ARENA_MAX"] = "2"  # CRITICAL: Prevent glibc thread-local OOM in Docker!
+
+import cv2, numpy as np, onnxruntime as ort, urllib.request, uuid, gc
+import threading, queue
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse
 
 # --- CONFIG ---
@@ -125,6 +129,7 @@ app = FastAPI(title="Gastronomy AI", version="2.0")
 
 # --- JOBS STATE ---
 jobs = {}
+job_queue = queue.Queue()
 
 # --- HELPERS ---
 def decode_image(b: bytes) -> np.ndarray:
@@ -294,8 +299,19 @@ def process_batch_background(job_id: str, images: list, weights: list):
         import traceback; traceback.print_exc()
         jobs[job_id] = {"status": "error", "message": str(e)}
 
+# --- DEDICATED WORKER THREAD ---
+# Runs ONNX in a single thread to prevent ThreadPool memory leaks!
+def worker_loop():
+    while True:
+        job = job_queue.get()
+        if job is None: break
+        process_batch_background(*job)
+        job_queue.task_done()
+
+threading.Thread(target=worker_loop, daemon=True).start()
+
 @app.post("/analyze_batch")
-async def analyze_batch(request: Request, background_tasks: BackgroundTasks):
+async def analyze_batch(request: Request):
     """
     Batch delta endpoint called by ESP32 SEND button.
     Now returns a job_id instantly for polling.
@@ -320,7 +336,7 @@ async def analyze_batch(request: Request, background_tasks: BackgroundTasks):
 
         job_id = str(uuid.uuid4())
         jobs[job_id] = {"status": "processing"}
-        background_tasks.add_task(process_batch_background, job_id, images, weights)
+        job_queue.put((job_id, images, weights))
         
         return JSONResponse({"status": "processing", "job_id": job_id})
 
