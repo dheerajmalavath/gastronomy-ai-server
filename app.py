@@ -88,8 +88,12 @@ def download_model(url, dest):
     if not os.path.exists(dest):
         print(f"[Boot] Downloading {os.path.basename(dest)} ...")
         import urllib.request
-        # Stream in 8 MB chunks — avoids loading full file into RAM at once
-        with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+        # Add User-Agent to avoid GitHub anonymous API rate limits causing 502
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
             chunk = 8 * 1024 * 1024  # 8 MB chunks
             while True:
                 data = resp.read(chunk)
