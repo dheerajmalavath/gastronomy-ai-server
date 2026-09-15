@@ -12,8 +12,8 @@ KEY FIXES vs original app.py:
   5. Full FOODSEG103 + Indian food class lists
 """
 
-import os, cv2, numpy as np, onnxruntime as ort, urllib.request
-from fastapi import FastAPI, File, UploadFile, Form, Request
+import os, cv2, numpy as np, onnxruntime as ort, urllib.request, uuid
+from fastapi import FastAPI, File, UploadFile, Form, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 # --- CONFIG ---
@@ -116,6 +116,9 @@ _clf_inp     = clf_session.get_inputs()[0].name
 print("[Boot] Both models ready.")
 
 app = FastAPI(title="Gastronomy AI", version="2.0")
+
+# --- JOBS STATE ---
+jobs = {}
 
 # --- HELPERS ---
 def decode_image(b: bytes) -> np.ndarray:
@@ -255,42 +258,15 @@ async def analyze(
         return JSONResponse(status_code=500, content={"status":"error","message":str(e)})
 
 
-@app.post("/analyze_batch")
-async def analyze_batch(request: Request):
-    """
-    Batch delta endpoint called by ESP32 SEND button.
-    Accepts N images (image_0..image_{N-1}) + N weights (weight_0..weight_{N-1}).
-    Processes N-1 consecutive deltas and returns all results.
-    """
+def process_batch_background(job_id: str, images: list, weights: list):
     try:
-        form = await request.form()
-
-        # Extract all images and weights dynamically
-        images, weights = [], []
-        i = 0
-        while True:
-            img_key = f"image_{i}"
-            wt_key  = f"weight_{i}"
-            if img_key not in form:
-                break
-            img_bytes = await form[img_key].read()
-            images.append(decode_image(img_bytes))
-            weights.append(float(form[wt_key]))
-            i += 1
-
         N = len(images)
-        if N < 2:
-            return JSONResponse(status_code=400, content={
-                "status": "error",
-                "message": f"Need at least 2 images, got {N}"
-            })
-
-        print(f"[Batch] Processing {N} snaps -> {N-1} deltas")
-
+        print(f"[Job {job_id}] Processing {N} snaps -> {N-1} deltas")
+        
         results = []
         for step in range(N - 1):
             delta_w = max(0.0, weights[step+1] - weights[step])
-            print(f"[Batch] Step {step+1}/{N-1}: delta={delta_w:.1f}g")
+            print(f"[Job {job_id}] Step {step+1}/{N-1}: delta={delta_w:.1f}g")
 
             if delta_w < 5.0:
                 results.append({
@@ -309,16 +285,55 @@ async def analyze_batch(request: Request):
             results.append(r)
 
         total_kcal = sum(r.get("calories_kcal", 0) for r in results)
-        return JSONResponse({
+        jobs[job_id] = {
             "status": "success",
             "count": len(results),
             "total_calories_kcal": round(total_kcal, 1),
-            "results": results,
-        })
+            "results": results
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        jobs[job_id] = {"status": "error", "message": str(e)}
+
+@app.post("/analyze_batch")
+async def analyze_batch(request: Request, background_tasks: BackgroundTasks):
+    """
+    Batch delta endpoint called by ESP32 SEND button.
+    Now returns a job_id instantly for polling.
+    """
+    try:
+        form = await request.form()
+        images, weights = [], []
+        i = 0
+        while True:
+            img_key = f"image_{i}"
+            wt_key  = f"weight_{i}"
+            if img_key not in form:
+                break
+            img_bytes = await form[img_key].read()
+            images.append(decode_image(img_bytes))
+            weights.append(float(form[wt_key]))
+            i += 1
+
+        N = len(images)
+        if N < 2:
+            return JSONResponse(status_code=400, content={"status": "error", "message": f"Need at least 2 images, got {N}"})
+
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "processing"}
+        background_tasks.add_task(process_batch_background, job_id, images, weights)
+        
+        return JSONResponse({"status": "processing", "job_id": job_id})
 
     except Exception as e:
         import traceback; traceback.print_exc()
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+@app.get("/job/{job_id}")
+def get_job_status(job_id: str):
+    if job_id not in jobs:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Job not found"})
+    return JSONResponse(jobs[job_id])
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
