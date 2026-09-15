@@ -281,7 +281,7 @@ async def analyze_batch(request: Request):
                 "message": f"Need at least 2 images, got {N}"
             })
 
-        print(f"[Batch] Processing {N} snaps → {N-1} deltas")
+        print(f"[Batch] Processing {N} snaps -> {N-1} deltas")
 
         results = []
         for step in range(N - 1):
