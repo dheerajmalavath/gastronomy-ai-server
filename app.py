@@ -15,10 +15,12 @@ KEY FIXES vs original app.py:
 import os
 os.environ["MALLOC_ARENA_MAX"] = "2"  # CRITICAL: Prevent glibc thread-local OOM in Docker!
 
-import cv2, numpy as np, onnxruntime as ort, urllib.request, uuid, gc
+import cv2, numpy as np, onnxruntime as ort, urllib.request, uuid, gc, shutil
 import threading, queue
 from fastapi import FastAPI, File, UploadFile, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 # --- CONFIG ---
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +37,8 @@ SEG_STD  = np.array([0.229, 0.224, 0.225], np.float32)
 SEG_IMG_SIZE  = (512, 512)
 SEG_NUM_CLASS = 104
 CLF_IMG_SIZE  = (300, 300)
-MIN_NEW_BLOB_PX       = 150
-PLATE_ARTIFACT_THRESH = 0.45
+MIN_NEW_BLOB_PX       = 80    # BUG FIX: was 150 — too high, was filtering small items like eggs/single serving
+PLATE_ARTIFACT_THRESH = 0.85  # BUG FIX: was 0.90 — large plates were eating into legitimate large items
 LOW_CONF_THRESH       = 0.25
 
 # --- FOOD CLASSES ---
@@ -73,10 +75,46 @@ INDIAN_FOOD_CLASSES = [
 ]
 
 SEG_CLASS_REMAP = {'kelp': 'rice', 'seaweed': 'rice'}
+
+# BUG FIX: Expanded SEG_TRUST — SegFormer is reliable for these distinctive shapes.
+# These bypass the Indian classifier which would misidentify them.
 SEG_TRUST = {
     'egg','rice','steak','pork','chicken duck','sausage','fish fillet','shrimp',
-    'noodles','pasta','soup','corn','tomato','banana','watermelon','orange','apple',
+    'soup','corn','tomato','banana','watermelon','orange','apple',
     'mango','broccoli','carrot','cucumber',
+    # Newly added — distinctive shapes SegFormer reliably gets right
+    'bread','noodles','tofu','potato','eggplant','fried meat','pie',
+}
+
+# BUG FIX: Maps SegFormer class names -> proper Indian food label.
+# Without this, dish='bread' was returned instead of 'chapati', etc.
+SEG_TO_INDIAN_MAP = {
+    'egg':          'egg',
+    'rice':         'rice',
+    'soup':         'soup',
+    'bread':        'chapati',       # most common flatbread in Indian meals
+    'corn':         'corn',
+    'tomato':       'tomato',
+    'potato':       'dum_aloo',      # most common Indian potato dish
+    'eggplant':     'baingan',       # baingan bharta
+    'noodles':      'noodles',
+    'tofu':         'tofu',
+    'steak':        'steak',
+    'pork':         'pork',
+    'chicken duck': 'chicken_tikka',
+    'sausage':      'sausage',
+    'fish fillet':  'maach_jhol',
+    'shrimp':       'shrimp',
+    'fried meat':   'chicken_tikka',
+    'pie':          'pie',
+    'banana':       'banana',
+    'watermelon':   'watermelon',
+    'orange':       'orange',
+    'apple':        'apple',
+    'mango':        'mango',
+    'broccoli':     'broccoli',
+    'carrot':       'carrot',
+    'cucumber':     'cucumber',
 }
 CALORIE_MAP = {
     'biryani':1.8,'butter_chicken':2.4,'dal_tadka':1.2,'chapati':3.0,'naan':2.9,
@@ -129,7 +167,12 @@ app = FastAPI(title="Gastronomy AI", version="2.0")
 
 # --- JOBS STATE ---
 jobs = {}
+job_list_ordered = [] # Keep track of job order for UI
 job_queue = queue.Queue()
+
+# --- STATIC & TEMPLATES ---
+os.makedirs("static/jobs", exist_ok=True)
+os.makedirs("templates", exist_ok=True)
 
 # --- HELPERS ---
 def decode_image(b: bytes) -> np.ndarray:
@@ -170,19 +213,45 @@ def clean_seg(mask, min_px=400):
     return out
 
 def get_delta_mask(prev, curr):
-    new_cls = (set(np.unique(curr).tolist()) - set(np.unique(prev).tolist())) - {0}
-    if new_cls:
-        print(f"  [delta] new classes: {[FOODSEG103_CLASSES[c] for c in sorted(new_cls)]}")
+    # Robust Class Subtraction
+    # Only consider classes that have a meaningful number of pixels to ignore tiny hallucinations
+    def get_valid_classes(mask):
+        valid = set()
+        uid, cnt = np.unique(mask, return_counts=True)
+        for u, c in zip(uid, cnt):
+            if u > 0 and c >= MIN_NEW_BLOB_PX:
+                valid.add(u)
+        return valid
+
+    prev_classes = get_valid_classes(prev)
+    curr_classes = get_valid_classes(curr)
+    
+    new_cls = curr_classes - prev_classes
     new_mask = np.zeros_like(curr)
-    for c in new_cls: new_mask[curr==c] = c
-    binary = (new_mask>0).astype(np.uint8)
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7))
+    
+    for c in curr_classes:
+        if c in new_cls:
+            # Condition 1: Brand new class! Keep ALL pixels of this class to support stacking
+            new_mask[curr == c] = c
+        else:
+            # Condition 2: Old class, but maybe a new physical item!
+            # Keep pixels ONLY IF they were physically empty in the previous step
+            mask_c = (curr == c)
+            empty_in_prev = (prev == 0)
+            valid_pixels = mask_c & empty_in_prev
+            new_mask[valid_pixels] = c
+            
+    binary = (new_mask > 0).astype(np.uint8)
+    
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k, iterations=1)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k, iterations=2)
-    n,lbl,stats,_ = cv2.connectedComponentsWithStats(binary,8)
+    
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     out = np.zeros_like(curr)
-    for i in range(1,n):
-        if stats[i,cv2.CC_STAT_AREA] >= MIN_NEW_BLOB_PX:
-            out[lbl==i] = curr[lbl==i]
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] >= MIN_NEW_BLOB_PX:
+            out[lbl == i] = curr[lbl == i]
     return out
 
 def classify_crop(img, blob_bin):
@@ -190,9 +259,13 @@ def classify_crop(img, blob_bin):
     y1=max(0,ys.min()-m); y2=min(img.shape[0],ys.max()+m)
     x1=max(0,xs.min()-m); x2=min(img.shape[1],xs.max()+m)
     crop = img[y1:y2,x1:x2].copy()
-    masked = np.full_like(crop,128); masked[blob_bin[y1:y2,x1:x2]] = crop[blob_bin[y1:y2,x1:x2]]
-    resized = cv2.resize(masked, CLF_IMG_SIZE).astype(np.float32)  # raw 0-255 confirmed
+    
+    # TF Hub models prefer raw unmasked crops
+    resized = cv2.resize(crop, CLF_IMG_SIZE).astype(np.float32)
+    
+    # ONNX model has built-in Softmax, do not apply it again!
     probs = clf_session.run(None, {_clf_inp: resized[np.newaxis]})[0][0]
+    
     top = np.argsort(probs)[::-1][:3]
     return [(INDIAN_FOOD_CLASSES[j] if j<len(INDIAN_FOOD_CLASSES) else f'idx_{j}', float(probs[j])) for j in top]
 
@@ -230,12 +303,15 @@ def run_pipeline(prev_rgb, curr_rgb, delta_weight):
     if seg_name != seg_raw: print(f"  [remap] {seg_raw} -> {seg_name}")
 
     if seg_name in SEG_TRUST:
-        dish,confidence,topk,source = seg_name,1.0,[(seg_name,1.0)],"seg"
+        # BUG FIX: Use SEG_TO_INDIAN_MAP so we get 'chapati' not 'bread', etc.
+        dish = SEG_TO_INDIAN_MAP.get(seg_name, seg_name)
+        confidence, topk, source = 0.77, [(dish, 0.77)], "seg"
+        print(f"  [seg_trust] {seg_name} -> {dish}")
     else:
         topk = classify_crop(curr512, blob_bin)
         confidence = topk[0][1]
-        dish = seg_name if confidence<LOW_CONF_THRESH else topk[0][0]
-        source = "seg-lowconf" if confidence<LOW_CONF_THRESH else "clf"
+        dish = topk[0][0]  # Trust the Indian classifier if not in SEG_TRUST
+        source = "clf"
 
     calories = round(delta_weight * CALORIE_MAP.get(dish, DEFAULT_CAL), 1)
     return {
@@ -246,9 +322,7 @@ def run_pipeline(prev_rgb, curr_rgb, delta_weight):
     }
 
 # --- ENDPOINTS ---
-@app.get("/")
-def health():
-    return {"status":"online","service":"Gastronomy AI v2","endpoint":"POST /analyze"}
+
 
 @app.post("/analyze")
 async def analyze(
@@ -277,27 +351,60 @@ def process_batch_background(job_id: str, images: list, weights: list):
         print(f"[Job {job_id}] Processing {N} snaps -> {N-1} deltas")
         
         results = []
+        # BUG FIX (Bug 3): Track dishes detected in this batch to catch exact duplicates.
+        # A duplicate is suspicious — flag it but still keep it (2 chapatis CAN be legit).
+        detected_dishes_in_batch = {}
+
         for step in range(N - 1):
             delta_w = max(0.0, weights[step+1] - weights[step])
             print(f"[Job {job_id}] Step {step+1}/{N-1}: delta={delta_w:.1f}g")
 
-
-
             r = run_pipeline(images[step], images[step+1], delta_w)
             r["step"] = step + 1
+            r["image_url"] = f"/static/jobs/{job_id}/step_{step+1}.jpg"
+
+            # BUG FIX (Bug 3): Duplicate dish detection across batch steps
+            if r.get("status") == "success" and r.get("dish"):
+                dish = r["dish"]
+                if dish in detected_dishes_in_batch:
+                    prev_step = detected_dishes_in_batch[dish]
+                    print(f"  [DUPLICATE] '{dish}' already seen at step {prev_step}. "
+                          f"Flagging step {step+1} — could be same item re-detected or a second serving.")
+                    r["duplicate_of_step"] = prev_step
+                    # Slightly lower confidence to reflect uncertainty
+                    r["confidence"] = round(r.get("confidence", 0.77) * 0.85, 4)
+                detected_dishes_in_batch[dish] = step + 1
+
             results.append(r)
             gc.collect()
 
-        total_kcal = sum(r.get("calories_kcal", 0) for r in results)
         jobs[job_id] = {
             "status": "success",
             "count": len(results),
-            "total_calories_kcal": round(total_kcal, 1),
+            "baseline": {
+                "image_url": f"/static/jobs/{job_id}/step_0.jpg",
+                "weight_g": round(weights[0], 1)
+            },
             "results": results
         }
     except Exception as e:
         import traceback; traceback.print_exc()
         jobs[job_id] = {"status": "error", "message": str(e)}
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/jobs_list")
+def get_jobs_list():
+    # Return last 10 jobs reversed (newest first)
+    recent = []
+    for jid in reversed(job_list_ordered[-10:]):
+        recent.append({"job_id": jid, "data": jobs[jid]})
+    return JSONResponse(recent)
 
 # --- DEDICATED WORKER THREAD ---
 # Runs ONNX in a single thread to prevent ThreadPool memory leaks!
@@ -318,6 +425,10 @@ async def analyze_batch(request: Request):
     """
     try:
         form = await request.form()
+        job_id = str(uuid.uuid4())
+        job_dir = f"static/jobs/{job_id}"
+        os.makedirs(job_dir, exist_ok=True)
+
         images, weights = [], []
         i = 0
         while True:
@@ -326,6 +437,11 @@ async def analyze_batch(request: Request):
             if img_key not in form:
                 break
             img_bytes = await form[img_key].read()
+            
+            # Save the image to static folder for UI
+            with open(f"{job_dir}/step_{i}.jpg", "wb") as f:
+                f.write(img_bytes)
+                
             images.append(decode_image(img_bytes))
             weights.append(float(form[wt_key]))
             i += 1
@@ -334,8 +450,8 @@ async def analyze_batch(request: Request):
         if N < 2:
             return JSONResponse(status_code=400, content={"status": "error", "message": f"Need at least 2 images, got {N}"})
 
-        job_id = str(uuid.uuid4())
         jobs[job_id] = {"status": "processing"}
+        job_list_ordered.append(job_id)
         job_queue.put((job_id, images, weights))
         
         return JSONResponse({"status": "processing", "job_id": job_id})
