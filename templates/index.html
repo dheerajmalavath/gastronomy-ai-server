@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GastronomyAI - Live Dashboard</title>
+    <!-- Use Tailwind CSS for rapid styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #e2e8f0;
+            font-family: 'Inter', sans-serif;
+        }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .animate-pulse-slow {
+            animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+</head>
+<body class="min-h-screen flex flex-col items-center py-10 px-4">
+
+    <!-- Header -->
+    <div class="text-center mb-8">
+        <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500 mb-2">
+            GastronomyAI
+        </h1>
+        <p class="text-slate-400 text-lg">Live Camera Stream</p>
+        <div class="mt-4 flex items-center justify-center space-x-2">
+            <div class="w-3 h-3 bg-emerald-500 rounded-full animate-pulse-slow"></div>
+            <span class="text-emerald-500 font-semibold text-sm">Server Online</span>
+        </div>
+    </div>
+
+    <!-- Live Stream Container (Untouched & Active) -->
+    <div class="w-full max-w-2xl glass-panel rounded-2xl p-6 shadow-2xl flex flex-col items-center mb-8">
+        <h2 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
+            <span class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></span>
+            Live Stream Feed
+        </h2>
+        <div class="w-full aspect-video bg-slate-900 rounded-xl overflow-hidden border border-slate-700 flex items-center justify-center relative">
+            <img src="/stream" onerror="this.onerror=null; this.src='http://172.168.1.23/stream';" class="w-full h-full object-contain" alt="Live Stream" />
+        </div>
+    </div>
+
+    <!-- 
+    ===================================================================
+    COMMENTED OUT WEB LOGIC FOR IMAGE, ITEM NAME, WEIGHT RENDERING
+    (Saved for future reuse as requested by user)
+    ===================================================================
+    <div id="jobs-container" class="w-full max-w-5xl flex flex-col space-y-8">
+        <div class="text-center text-slate-500 py-10" id="loading-text">
+            Waiting for ESP32 batches...
+        </div>
+    </div>
+    -->
+
+    <script>
+        /*
+        ===================================================================
+        COMMENTED OUT WEB LOGIC FOR IMAGE, ITEM NAME, WEIGHT RENDERING
+        (Results are now output directly onto ESP32 OLED Display table)
+        ===================================================================
+
+        async function fetchJobs() {
+            try {
+                const response = await fetch('/jobs_list');
+                const jobs = await response.json();
+                
+                const container = document.getElementById('jobs-container');
+                const loadingText = document.getElementById('loading-text');
+
+                if (jobs.length > 0 && loadingText) {
+                    loadingText.remove();
+                }
+
+                // Create HTML for jobs
+                let html = '';
+                for (const job of jobs) {
+                    const statusColor = job.data.status === 'success' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 
+                                        job.data.status === 'processing' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 
+                                        'bg-red-500/20 text-red-400 border-red-500/30';
+                    
+                    let mealHtml = `
+                        <div class="glass-panel rounded-2xl p-6 shadow-2xl transition-all duration-300 hover:shadow-teal-500/10">
+                            <div class="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
+                                <div>
+                                    <h2 class="text-xl font-bold text-white">Meal Batch</h2>
+                                    <p class="text-xs text-slate-500 font-mono mt-1">${job.job_id}</p>
+                                </div>
+                                <div class="px-4 py-1 rounded-full text-sm font-semibold border ${statusColor}">
+                                    ${job.data.status.toUpperCase()}
+                                </div>
+                            </div>
+                    `;
+
+                    if (job.data.status === 'success') {
+                        mealHtml += `
+                            <div class="flex items-center justify-between bg-slate-800/50 rounded-xl p-4 mb-6">
+                                <span class="text-slate-300">Total Items Detected: <strong class="text-white">${job.data.count}</strong></span>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                
+                                <!-- Baseline / Empty Plate -->
+                                <div class="bg-slate-800/80 rounded-xl p-4 border border-slate-700 shadow-lg relative group">
+                                    <div class="w-full aspect-square bg-slate-900 rounded-lg overflow-hidden mb-4 relative">
+                                        <img src="${job.data.baseline.image_url}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                                        <div class="absolute top-2 right-2 bg-black/70 backdrop-blur-md px-2 py-1 rounded text-xs font-bold text-teal-300 border border-teal-500/30">
+                                            ${job.data.baseline.weight_g}g
+                                        </div>
+                                    </div>
+                                    <div class="text-center">
+                                        <h3 class="text-lg font-bold text-white mb-1">Empty Plate (Baseline)</h3>
+                                        <div class="flex justify-center items-center text-sm px-2">
+                                            <span class="text-slate-400">Step 0</span>
+                                        </div>
+                                    </div>
+                                </div>
+                        `;
+                        
+                        // Add each food step
+                        for (const res of job.data.results) {
+                            if (res.status === 'ignored') {
+                                mealHtml += `
+                                    <div class="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50 flex flex-col items-center justify-center text-center h-full">
+                                        <p class="text-slate-400 mb-2">Step ${res.step}</p>
+                                        <span class="text-amber-500/70 text-sm font-medium px-3 py-1 bg-amber-500/10 rounded-full">Ignored (< 5g)</span>
+                                    </div>
+                                `;
+                            } else if (res.status === 'no_new_food') {
+                                mealHtml += `
+                                    <div class="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50 flex flex-col items-center justify-center text-center">
+                                        <div class="w-full aspect-square bg-slate-900 rounded-lg overflow-hidden mb-4 relative">
+                                            <img src="${res.image_url}" class="w-full h-full object-cover opacity-50" />
+                                            <div class="absolute top-2 right-2 bg-black/70 backdrop-blur-md px-2 py-1 rounded text-xs font-bold text-teal-300 border border-teal-500/30">
+                                                ${res.weight_g}g
+                                            </div>
+                                        </div>
+                                        <span class="text-amber-500 text-sm font-medium px-3 py-1 bg-amber-500/10 rounded-full">No new food detected</span>
+                                    </div>
+                                `;
+                            } else {
+                                const confidencePercent = Math.round(res.confidence * 100);
+                                mealHtml += `
+                                    <div class="bg-slate-800/80 rounded-xl p-4 border border-slate-700 shadow-lg relative group">
+                                        <!-- Image -->
+                                        <div class="w-full aspect-square bg-slate-900 rounded-lg overflow-hidden mb-4 relative">
+                                            <img src="${res.image_url}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                                            <div class="absolute top-2 right-2 bg-black/70 backdrop-blur-md px-2 py-1 rounded text-xs font-bold text-teal-300 border border-teal-500/30">
+                                                ${res.weight_g}g
+                                            </div>
+                                        </div>
+                                        
+                                        <!-- Details -->
+                                        <div class="text-center">
+                                            <h3 class="text-lg font-bold text-white mb-1 capitalize">${(res.dish || 'Unknown').replace(/_/g, ' ')}</h3>
+                                            <div class="flex justify-center items-center text-sm px-2">
+                                                <span class="text-slate-400">Confidence: <span class="text-slate-200">${confidencePercent}%</span></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }
+                        }
+                        mealHtml += `</div>`;
+                    } else if (job.data.status === 'processing') {
+                        mealHtml += `
+                            <div class="flex flex-col items-center justify-center py-12">
+                                <div class="w-12 h-12 border-4 border-slate-600 border-t-teal-500 rounded-full animate-spin mb-4"></div>
+                                <p class="text-teal-400 font-medium animate-pulse">Running ONNX Pipeline...</p>
+                            </div>
+                        `;
+                    }
+
+                    mealHtml += `</div>`;
+                    html += mealHtml;
+                }
+
+                if (html !== '') {
+                    container.innerHTML = html;
+                }
+            } catch (err) {
+                console.error("Failed to fetch jobs:", err);
+            }
+        }
+
+        // Poll every 3 seconds
+        setInterval(fetchJobs, 3000);
+        fetchJobs(); // initial fetch
+        */
+    </script>
+</body>
+</html>
