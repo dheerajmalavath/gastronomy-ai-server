@@ -171,8 +171,8 @@ job_list_ordered = [] # Keep track of job order for UI
 job_queue = queue.Queue()
 
 # --- STATIC & TEMPLATES ---
-os.makedirs("static/jobs", exist_ok=True)
-os.makedirs("templates", exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "static", "jobs"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "templates"), exist_ok=True)
 
 # --- HELPERS ---
 def decode_image(b: bytes) -> np.ndarray:
@@ -391,8 +391,8 @@ def process_batch_background(job_id: str, images: list, weights: list):
         import traceback; traceback.print_exc()
         jobs[job_id] = {"status": "error", "message": str(e)}
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -426,7 +426,7 @@ async def analyze_batch(request: Request):
     try:
         form = await request.form()
         job_id = str(uuid.uuid4())
-        job_dir = f"static/jobs/{job_id}"
+        job_dir = os.path.join(BASE_DIR, "static", "jobs", job_id)
         os.makedirs(job_dir, exist_ok=True)
 
         images, weights = [], []
@@ -467,7 +467,8 @@ def get_job_status(job_id: str):
     return JSONResponse(jobs[job_id])
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
 
 
 
